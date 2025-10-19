@@ -62,8 +62,6 @@ static int recv_line(int s, char *out, size_t cap) {
     if (c == '\r') {
       continue;
     }
-    printf("[RECV_LINE] got char='%c' (%d)\n", c, c);
-    fflush(stdout);
     if (c == '\n') {
       break;
     }
