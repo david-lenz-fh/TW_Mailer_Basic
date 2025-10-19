@@ -9,14 +9,13 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 #define BACKLOG 5
 #define SUBJECT_MAXLEN 80
 
-int fd = -1;
-int cfd = -1;
+int listen_fd = -1;
+int client_fd = -1;
 int abortRequested = 0;
 
 static const char *g_spoolDir = NULL;
@@ -109,6 +108,14 @@ static int validUser(const char *u) {
   return 1;
 }
 
+static void close_socket(int *fd) {
+  if (*fd != -1) {
+    shutdown(*fd, SHUT_RDWR);
+    close(*fd);
+    *fd = -1;
+  }
+}
+
 char *listMessages(char *username);
 int persistMessage(char **messageLines);
 char *readSingleMessage(char *username, char *messageId);
@@ -145,37 +152,36 @@ int main(int argc, char *argv[]) {
   serverInfo.sin_addr.s_addr = htonl(INADDR_ANY);
   serverInfo.sin_port = htons(port);
 
-  fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd == -1) {
+  listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (listen_fd == -1) {
     perror("socket");
     return EXIT_FAILURE;
   }
 
   int opt = 1;
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #ifdef SO_REUSEPORT
-  setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+  setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
 
-  if (bind(fd, (struct sockaddr *)&serverInfo, sizeof(serverInfo)) == -1) {
+  if (bind(listen_fd, (struct sockaddr *)&serverInfo, sizeof(serverInfo)) ==
+      -1) {
     perror("bind");
-    shutdown(fd, SHUT_RDWR);
-    close(fd);
+    close_socket(&listen_fd);
     return EXIT_FAILURE;
   }
 
-  if (listen(fd, BACKLOG) == -1) {
+  if (listen(listen_fd, BACKLOG) == -1) {
     perror("listen");
-    shutdown(fd, SHUT_RDWR);
-    close(fd);
+    close_socket(&listen_fd);
     return EXIT_FAILURE;
   }
 
   printf("Server running on port %d...\n", port);
 
   while (!abortRequested) {
-    cfd = accept(fd, (struct sockaddr *)&clientInfo, &clientSize);
-    if (cfd == -1) {
+    client_fd = accept(listen_fd, (struct sockaddr *)&clientInfo, &clientSize);
+    if (client_fd == -1) {
       if (errno == EINTR) {
         continue;
       }
@@ -184,11 +190,11 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Client connected\n");
-    send_all(cfd, "Connected\n", 10);
+    send_all(client_fd, "Connected\n", 10);
 
     char line[1024];
     while (1) {
-      int n = recv_line(cfd, line, sizeof(line));
+      int n = recv_line(client_fd, line, sizeof(line));
       if (n <= 0) {
         break;
       }
@@ -198,9 +204,8 @@ int main(int argc, char *argv[]) {
         char *body = NULL;
         size_t body_cap = 0, body_len = 0;
         int err = 0;
-
         // sender
-        n = recv_line(cfd, line, sizeof(line));
+        n = recv_line(client_fd, line, sizeof(line));
         if (n <= 0 || !validUser(line)) {
           err = 1;
         } else {
@@ -209,7 +214,7 @@ int main(int argc, char *argv[]) {
 
         // receiver
         if (!err) {
-          n = recv_line(cfd, line, sizeof(line));
+          n = recv_line(client_fd, line, sizeof(line));
           if (n <= 0 || !validUser(line)) {
             err = 1;
           } else {
@@ -219,7 +224,7 @@ int main(int argc, char *argv[]) {
 
         // subject
         if (!err) {
-          n = recv_line(cfd, line, sizeof(line));
+          n = recv_line(client_fd, line, sizeof(line));
           if (n <= 0) {
             err = 1;
           } else {
@@ -227,42 +232,19 @@ int main(int argc, char *argv[]) {
             subject = strdup(line);
           }
         }
-        printf("[DEBUG] err=%d sender=%s receiver=%s subject=%s\n", err,
-               sender ? sender : "NULL", receiver ? receiver : "NULL",
-               subject ? subject : "NULL");
         fflush(stdout);
 
         while (!err) {
-          n = recv_line(cfd, line, sizeof(line));
+          n = recv_line(client_fd, line, sizeof(line));
           if (n <= 0) {
             err = 1;
             break;
           }
-          printf("[BODY] received line='%s'\n", line);
           fflush(stdout);
-          for (int i = 0; line[i]; i++) {
-            if (line[i] == '\r' || line[i] == ' ' || line[i] == '\t')
-              line[i] = '\0';
-          }
-          if (strcmp(line, ".") == 0) {
+          if (line[0] == '.' && line[1] == '\0') {
             break;
           }
 
-          size_t need = body_len + strlen(line) + 2;
-          if (need > body_cap) {
-            size_t new_cap = body_cap ? body_cap * 2 : 1024;
-            while (new_cap < need) {
-              new_cap *= 2;
-            }
-            char *tmp = realloc(body, new_cap);
-            if (tmp == NULL) {
-              err = 1;
-              break;
-            } else {
-              body = tmp;
-              body_cap = new_cap;
-            }
-          }
           size_t line_len = strlen(line);
           if (body_len + line_len + 2 > body_cap) {
             size_t new_cap = body_cap ? body_cap * 2 : 1024;
@@ -276,9 +258,11 @@ int main(int argc, char *argv[]) {
             body = tmp;
             body_cap = new_cap;
           }
+          if (body_len > 0) {
+            body[body_len++] = ' '; // turn newlines into spaces
+          }
           memcpy(body + body_len, line, line_len);
           body_len += line_len;
-          body[body_len++] = '\n';
           body[body_len] = '\0';
         }
 
@@ -286,12 +270,12 @@ int main(int argc, char *argv[]) {
           char *messageLines[7] = {"SEND", sender, receiver, subject,
                                    body,   ".",    NULL};
           if (persistMessage(messageLines) == -1) {
-            send_all(cfd, "ERR\n", 4);
+            send_all(client_fd, "ERR\n", 4);
           } else {
-            send_all(cfd, "OK\n", 3);
+            send_all(client_fd, "OK\n", 3);
           }
         } else {
-          send_all(cfd, "ERR\n", 4);
+          send_all(client_fd, "ERR\n", 4);
         }
 
         free(sender);
@@ -301,78 +285,78 @@ int main(int argc, char *argv[]) {
       }
 
       else if (strcmp(line, "LIST") == 0) {
-        n = recv_line(cfd, line, sizeof(line));
+        n = recv_line(client_fd, line, sizeof(line));
         if (n <= 0 || !validUser(line)) {
-          send_all(cfd, "0\n", 2);
+          send_all(client_fd, "0\n", 2);
         } else {
           char *all = listMessages(line);
           if (all != NULL) {
-            send_all(cfd, all, strlen(all));
+            send_all(client_fd, all, strlen(all));
             free(all);
           } else {
-            send_all(cfd, "0\n", 2);
+            send_all(client_fd, "0\n", 2);
           }
         }
       } else if (strcmp(line, "READ") == 0) {
         char user[1024];
         char num[1024];
-        n = recv_line(cfd, user, sizeof(user));
+        n = recv_line(client_fd, user, sizeof(user));
         if (n <= 0 || !validUser(user)) {
-          send_all(cfd, "ERR\n", 4);
+          send_all(client_fd, "ERR\n", 4);
         } else {
-          n = recv_line(cfd, num, sizeof(num));
+          n = recv_line(client_fd, num, sizeof(num));
           if (n <= 0) {
-            send_all(cfd, "ERR\n", 4);
+            send_all(client_fd, "ERR\n", 4);
           } else {
             char *msg = readSingleMessage(user, num);
             if (msg != NULL) {
-              send_all(cfd, "OK\n", 3);
-              send_all(cfd, msg, strlen(msg));
+              send_all(client_fd, "OK\n", 3);
+              send_all(client_fd, msg, strlen(msg));
               free(msg);
             } else {
-              send_all(cfd, "ERR\n", 4);
+              send_all(client_fd, "ERR\n", 4);
             }
           }
         }
       } else if (strcmp(line, "DEL") == 0) {
         char user[1024];
         char num[1024];
-        n = recv_line(cfd, user, sizeof(user));
+        n = recv_line(client_fd, user, sizeof(user));
         if (n <= 0 || !validUser(user)) {
-          send_all(cfd, "ERR\n", 4);
+          send_all(client_fd, "ERR\n", 4);
         } else {
-          n = recv_line(cfd, num, sizeof(num));
+          n = recv_line(client_fd, num, sizeof(num));
           if (n <= 0) {
-            send_all(cfd, "ERR\n", 4);
+            send_all(client_fd, "ERR\n", 4);
           } else {
             int deleted = deleteMessage(user, num);
             if (deleted == 0) {
-              send_all(cfd, "OK\n", 3);
+              send_all(client_fd, "OK\n", 3);
             } else {
-              send_all(cfd, "ERR\n", 4);
+              send_all(client_fd, "ERR\n", 4);
             }
           }
         }
       } else if (strcmp(line, "QUIT") == 0) {
         break;
       } else {
-        send_all(cfd, "ERR\n", 4);
+        send_all(client_fd, "ERR\n", 4);
       }
     }
 
-    if (cfd != -1) {
-      shutdown(cfd, SHUT_RDWR);
-      close(cfd);
-      cfd = -1;
+    if (client_fd != -1) {
+      shutdown(client_fd, SHUT_RDWR);
+      close(client_fd);
+      client_fd = -1;
     }
 
     printf("Client disconnected\n");
   }
 
-  if (fd != -1) {
-    shutdown(fd, SHUT_RDWR);
-    close(fd);
-    fd = -1;
+  if (listen_fd != -1) {
+    shutdown(listen_fd, SHUT_RDWR);
+    close(listen_fd);
+    listen_fd = -1;
   }
 
   return EXIT_SUCCESS;
@@ -512,57 +496,70 @@ int deleteMessage(char *username, char *messageId) {
     return -1;
 
   size_t cap = strlen(message) + 1;
-  char *copyMessage = malloc(cap);
+  char *copyMessage = calloc(cap, 1);
   if (!copyMessage) {
     free(message);
     return -1;
   }
-  copyMessage[0] = '\0';
 
-  char **lines = str_split(message, '\n');
+  char *msgCopy = strdup(message);
+  if (!msgCopy) {
+    free(message);
+    free(copyMessage);
+    return -1;
+  }
+
+  char **lines = str_split(msgCopy, '\n');
   if (!lines) {
+    free(msgCopy);
     free(message);
     free(copyMessage);
     return -1;
   }
 
   for (int i = 0; lines[i]; i++) {
-    char **infos = str_split(lines[i], ';');
-    if (infos && infos[0] && strcmp(infos[0], messageId) != 0) {
-      if (append_capped(copyMessage, cap, lines[i]) == -1 ||
-          append_capped(copyMessage, cap, "\n") == -1) {
+    char *lineDup = strdup(lines[i]);
+    if (!lineDup) {
+      free_split(lines);
+      free(msgCopy);
+      free(message);
+      free(copyMessage);
+      return -1;
+    }
 
-        free_split(infos);
-        free_split(lines);
-        free(message);
-        free(copyMessage);
-        return -1;
-      }
+    char **infos = str_split(lineDup, ';');
+
+    if (infos && infos[0] && strcmp(infos[0], messageId) != 0) {
+      append_capped(copyMessage, cap, lines[i]);
+      append_capped(copyMessage, cap, "\n");
     } else if (infos && infos[0] && strcmp(infos[0], messageId) == 0) {
       re = 0;
     }
-    free_split(infos);
-  }
 
-  char filename[256];
-  snprintf(filename, sizeof(filename), "%s/%s.txt", g_spoolDir, username);
-  FILE *file = fopen(filename, "w");
-  if (!file) {
-    perror("fopen");
-    free_split(lines);
-    free(message);
-    free(copyMessage);
-    return -1;
+    free_split(infos);
+    free(lineDup);
   }
 
   if (re == 0) {
+    char filename[256];
+    snprintf(filename, sizeof(filename), "%s/%s.txt", g_spoolDir, username);
+    FILE *file = fopen(filename, "w");
+    if (!file) {
+      perror("fopen");
+      free_split(lines);
+      free(msgCopy);
+      free(message);
+      free(copyMessage);
+      return -1;
+    }
     fprintf(file, "%s", copyMessage);
+    fclose(file);
   }
 
   free_split(lines);
+  free(msgCopy);
   free(message);
   free(copyMessage);
-  fclose(file);
   return re;
 }
 
@@ -605,32 +602,11 @@ char *readMessage(char *username) {
 
 void signalHandler(int sig) {
   if (sig == SIGINT) {
-    printf("Abort requested\n");
+    printf("\nAbort requested, shutting down...\n");
     abortRequested = 1;
-
-    if (cfd != -1) {
-      if (shutdown(cfd, SHUT_RDWR) == -1) {
-        perror("shutdown new_socket");
-      }
-      if (close(cfd) == -1) {
-        perror("close new_socket");
-      }
-      cfd = -1;
-    }
-
-    if (fd != -1) {
-      if (shutdown(fd, SHUT_RDWR) == -1) {
-        perror("shutdown create_socket");
-      }
-      if (close(fd) == -1) {
-        perror("close create_socket");
-      }
-      fd = -1;
-    }
-
+    close_socket(&client_fd);
+    close_socket(&listen_fd);
     exit(0);
-  } else {
-    exit(sig);
   }
 }
 
@@ -670,28 +646,6 @@ char **str_split(char *a_str, const char a_delim) {
   return result;
 }
 
-char *joinStrings(char **strings, char sep) {
-  size_t totalLen = 1; // für '\0'
-  for (int i = 0; strings[i]; i++)
-    totalLen += strlen(strings[i]) + 1; // +1 für Separator
-
-  char *result = malloc(totalLen);
-  if (!result) {
-    return NULL;
-  }
-  result[0] = '\0';
-
-  for (int i = 0; strings[i]; i++) {
-    strcat(result, strings[i]);
-    if (strings[i + 1]) {
-      size_t len = strlen(result);
-      result[len] = sep;
-      result[len + 1] = '\0';
-    }
-  }
-
-  return result;
-}
 int countUserMessages(char *username) {
   int re = 0;
   char *userMesssages = readMessage(username);

@@ -14,6 +14,13 @@ static void die(const char *msg) {
   exit(EXIT_FAILURE);
 }
 
+static void close_socket(int sock) {
+  if (sock != -1) {
+    shutdown(sock, SHUT_RDWR);
+    close(sock);
+  }
+}
+
 static ssize_t send_all(int sock, const void *buf, size_t len) {
   const char *p = buf;
   size_t total = 0;
@@ -68,17 +75,13 @@ int main(int argc, char *argv[]) {
     printf("%s", buffer);
   }
 
-  int isQuit = 0;
-
-  while (!isQuit) {
+  while (1) {
     printf(">>");
     fflush(stdout);
 
-    if (!fgets(buffer, BUF, stdin))
+    if (!fgets(buffer, sizeof(buffer), stdin))
       break;
-    size_t len = strlen(buffer);
-    if (len > 0 && buffer[len - 1] == '\n')
-      buffer[len - 1] = '\0';
+    buffer[strcspn(buffer, "\n")] = '\0';
 
     if (strcasecmp(buffer, "quit") == 0) {
       send_all(sockfd, "QUIT\n", 5);
@@ -97,6 +100,47 @@ int main(int argc, char *argv[]) {
         }
         send_all(sockfd, buffer, strlen(buffer));
       }
+    } else if (strcasecmp(buffer, "LIST") == 0) {
+      send_all(sockfd, "LIST\n", 5);
+      printf("Username: ");
+      fflush(stdout);
+      if (fgets(buffer, sizeof(buffer), stdin)) {
+        buffer[strcspn(buffer, "\n")] = '\0';
+        send_all(sockfd, buffer, strlen(buffer));
+        send_all(sockfd, "\n", 1);
+      }
+    } else if (strcasecmp(buffer, "READ") == 0) {
+      send_all(sockfd, "READ\n", 5);
+      printf("Username: ");
+      fflush(stdout);
+      if (fgets(buffer, sizeof(buffer), stdin)) {
+        buffer[strcspn(buffer, "\n")] = '\0';
+        send_all(sockfd, buffer, strlen(buffer));
+        send_all(sockfd, "\n", 1);
+      }
+      printf("Message ID: ");
+      fflush(stdout);
+      if (fgets(buffer, sizeof(buffer), stdin)) {
+        buffer[strcspn(buffer, "\n")] = '\0';
+        send_all(sockfd, buffer, strlen(buffer));
+        send_all(sockfd, "\n", 1);
+      }
+    } else if (strcasecmp(buffer, "DEL") == 0) {
+      send_all(sockfd, "DEL\n", 4);
+      printf("Username: ");
+      fflush(stdout);
+      if (fgets(buffer, sizeof(buffer), stdin)) {
+        buffer[strcspn(buffer, "\n")] = '\0';
+        send_all(sockfd, buffer, strlen(buffer));
+        send_all(sockfd, "\n", 1);
+      }
+      printf("Message ID: ");
+      fflush(stdout);
+      if (fgets(buffer, sizeof(buffer), stdin)) {
+        buffer[strcspn(buffer, "\n")] = '\0';
+        send_all(sockfd, buffer, strlen(buffer));
+        send_all(sockfd, "\n", 1);
+      }
     } else {
       send_all(sockfd, buffer, strlen(buffer));
       send_all(sockfd, "\n", 1);
@@ -113,11 +157,8 @@ int main(int argc, char *argv[]) {
     if (buffer[size - 1] != '\n')
       printf("\n");
   }
-  if (shutdown(sockfd, SHUT_RDWR) == -1 && errno != ENOTCONN) {
-    perror("shutdown");
-  }
 
-  close(sockfd);
+  close_socket(sockfd);
   printf("Disconnected.\n");
 
   return EXIT_SUCCESS;
