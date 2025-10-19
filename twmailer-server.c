@@ -676,8 +676,9 @@ char *joinStrings(char **strings, char sep) {
     totalLen += strlen(strings[i]) + 1; // +1 für Separator
 
   char *result = malloc(totalLen);
-  if (!result)
+  if (!result) {
     return NULL;
+  }
   result[0] = '\0';
 
   for (int i = 0; strings[i]; i++) {
@@ -694,14 +695,20 @@ char *joinStrings(char **strings, char sep) {
 int countUserMessages(char *username) {
   int re = 0;
   char *userMesssages = readMessage(username);
-  if (!userMesssages)
+  if (!userMesssages) {
     return 0;
+  }
+
   char **lines = str_split(userMesssages, '\n');
   free(userMesssages);
-  if (!lines)
+  if (!lines) {
     return 0;
-  while (lines[re])
+  }
+
+  while (lines[re]) {
     re++;
+  }
+
   free_split(lines);
   return re;
 }

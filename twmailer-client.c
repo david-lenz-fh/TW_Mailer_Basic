@@ -87,7 +87,7 @@ int main(int argc, char *argv[]) {
 
     if (strcasecmp(buffer, "SEND") == 0) {
       send_all(sockfd, "SEND\n", 5);
-      printf("Enter message (end with single dot):\n");
+
       while (1) {
         if (!fgets(buffer, BUF, stdin))
           break;
