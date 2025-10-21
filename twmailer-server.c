@@ -204,8 +204,10 @@ int main(int argc, char *argv[]) {
         int err = 0;
         // sender
         n = recv_line(client_fd, line, sizeof(line));
-        if (n <= 0 || !validUser(line)) {
-          err = 1;
+        if (n <= 0) {
+          send_all(client_fd, "ERR no username provided\n", 26);
+        } else if (!validUser(line)) {
+          send_all(client_fd, "ERR invalid username\n", 21);
         } else {
           sender = strdup(line);
         }
@@ -268,12 +270,12 @@ int main(int argc, char *argv[]) {
           char *messageLines[7] = {"SEND", sender, receiver, subject,
                                    body,   ".",    NULL};
           if (persistMessage(messageLines) == -1) {
-            send_all(client_fd, "ERR\n", 4);
+            send_all(client_fd, "ERR persist failed\n", 19);
           } else {
             send_all(client_fd, "OK\n", 3);
           }
         } else {
-          send_all(client_fd, "ERR\n", 4);
+          send_all(client_fd, "ERR invalid input\n", 18);
         }
 
         free(sender);
@@ -299,12 +301,17 @@ int main(int argc, char *argv[]) {
         char user[1024];
         char num[1024];
         n = recv_line(client_fd, user, sizeof(user));
-        if (n <= 0 || !validUser(user)) {
-          send_all(client_fd, "ERR\n", 4);
+        if (n <= 0) {
+          send_all(client_fd, "ERR missing username\n", 22);
+          continue;
+        } else if (!validUser(user)) {
+          send_all(client_fd, "ERR invalid username\n", 21);
+          continue;
         } else {
           n = recv_line(client_fd, num, sizeof(num));
           if (n <= 0) {
-            send_all(client_fd, "ERR\n", 4);
+            send_all(client_fd, "ERR missing message id\n", 24);
+            continue;
           } else {
             char *msg = readSingleMessage(user, num);
             if (msg != NULL) {
@@ -312,7 +319,7 @@ int main(int argc, char *argv[]) {
               send_all(client_fd, msg, strlen(msg));
               free(msg);
             } else {
-              send_all(client_fd, "ERR\n", 4);
+              send_all(client_fd, "ERR message not found\n", 23);
             }
           }
         }
@@ -320,25 +327,27 @@ int main(int argc, char *argv[]) {
         char user[1024];
         char num[1024];
         n = recv_line(client_fd, user, sizeof(user));
-        if (n <= 0 || !validUser(user)) {
-          send_all(client_fd, "ERR\n", 4);
+        if (n <= 0) {
+          send_all(client_fd, "ERR missing username\n", 22);
+        } else if (!validUser(user)) {
+          send_all(client_fd, "ERR invalid username\n", 21);
         } else {
           n = recv_line(client_fd, num, sizeof(num));
           if (n <= 0) {
-            send_all(client_fd, "ERR\n", 4);
+            send_all(client_fd, "ERR missing message id\n", 24);
           } else {
             int deleted = deleteMessage(user, num);
             if (deleted == 0) {
               send_all(client_fd, "OK\n", 3);
             } else {
-              send_all(client_fd, "ERR\n", 4);
+              send_all(client_fd, "ERR message not found\n", 23);
             }
           }
         }
       } else if (strcmp(line, "QUIT") == 0) {
         break;
       } else {
-        send_all(client_fd, "ERR\n", 4);
+        send_all(client_fd, "ERR unknown command\n", 21);
       }
     }
 
@@ -567,7 +576,6 @@ char *readMessage(char *username) {
 
   FILE *file = fopen(filename, "rb");
   if (!file) {
-    /* not fatal for callers */
     return NULL;
   }
 
